@@ -10,6 +10,7 @@ and stream your Plex content directly in Stremio.
 * offers both direct and transcoded streams;
 * stream locally or from remote devices;
 * allows searching through your Plex library;
+* allows filtering catalogs by genre (genre lists come from your library and refresh when the client reloads the addon manifest);
 * works with Cinemeta and other IMDB-based addons;
 * handles media without IMDB matching;
 * uses OAuth for safe login without sharing passwords;
