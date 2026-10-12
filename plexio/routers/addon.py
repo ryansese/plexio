@@ -1,5 +1,7 @@
+import asyncio
 from itertools import chain
 from typing import Annotated
+from urllib.parse import parse_qsl
 
 from aiohttp import ClientSession
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -27,6 +29,7 @@ from plexio.plex.media_server_api import (
     SORT_OPTIONS,
     get_all_episodes,
     get_media,
+    get_section_genres,
     get_section_media,
     stremio_to_plex_id,
 )
@@ -40,6 +43,8 @@ router.dependencies.append(Depends(set_sentry_user))
     '/{installation_id}/{base64_cfg}/manifest.json', response_model_exclude_none=True
 )
 async def get_manifest(
+    http: Annotated[ClientSession, Depends(get_http_client)],
+    cache: Annotated[Redis, Depends(get_cache)],
     configuration: Annotated[
         AddonConfiguration | None,
         Depends(get_addon_configuration),
@@ -51,17 +56,42 @@ async def get_manifest(
     name = 'Plexio'
 
     if configuration is not None:
-        for section in configuration.sections:
+        sections_genres = await asyncio.gather(
+            *(
+                get_section_genres(
+                    client=http,
+                    url=configuration.discovery_url,
+                    token=configuration.access_token,
+                    cache=cache,
+                    section_id=section.key,
+                )
+                for section in configuration.sections
+            ),
+            return_exceptions=True,
+        )
+        for section, genres in zip(
+            configuration.sections, sections_genres, strict=True
+        ):
+            extra = [
+                {'name': 'skip', 'isRequired': False},
+                {'name': 'search', 'isRequired': False},
+                {'name': 'sort', 'options': list(SORT_OPTIONS.keys())},
+            ]
+            # a failed genre lookup must not break the whole manifest
+            if not isinstance(genres, BaseException) and genres:
+                extra.append(
+                    {
+                        'name': 'genre',
+                        'isRequired': False,
+                        'options': list(dict.fromkeys(g['title'] for g in genres)),
+                    },
+                )
             catalogs.append(
                 StremioCatalogManifest(
                     id=section.key,
                     type=PLEX_TO_STREMIO_MEDIA_TYPE[section.type],
                     name=f'{section.title} | {configuration.server_name}',
-                    extra=[
-                        {'name': 'skip', 'isRequired': False},
-                        {'name': 'search', 'isRequired': False},
-                        {'name': 'sort', 'options': list(SORT_OPTIONS.keys())},
-                    ],
+                    extra=extra,
                 ),
             )
 
@@ -103,12 +133,30 @@ async def get_manifest(
 )
 async def get_catalog(
     http: Annotated[ClientSession, Depends(get_http_client)],
+    cache: Annotated[Redis, Depends(get_cache)],
     configuration: Annotated[AddonConfiguration, Depends(get_addon_configuration)],
     stremio_type: StremioMediaType,
     catalog_id: str,
     extra: str = '',
 ) -> StremioCatalog:
-    extras = dict(e.split('=') for e in extra.split('&') if e)
+    extras = dict(parse_qsl(extra, keep_blank_values=True))
+
+    genre_key = None
+    if genre := extras.get('genre'):
+        genres = await get_section_genres(
+            client=http,
+            url=configuration.discovery_url,
+            token=configuration.access_token,
+            cache=cache,
+            section_id=catalog_id,
+        )
+        genre_key = next(
+            (g['key'] for g in genres if g['title'].lower() == genre.lower()),
+            None,
+        )
+        if genre_key is None:
+            return StremioCatalog(metas=[])
+
     media = await get_section_media(
         client=http,
         url=configuration.discovery_url,
@@ -117,6 +165,7 @@ async def get_catalog(
         search=extras.get('search', ''),
         skip=extras.get('skip', 0),
         sort=extras.get('sort', 'Title'),
+        genre=genre_key,
     )
     return StremioCatalog(
         metas=[m.to_stremio_meta_review(configuration) for m in media],

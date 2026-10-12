@@ -1,3 +1,4 @@
+import json
 from http import HTTPStatus
 
 from aiohttp import ClientConnectorError, ClientSession
@@ -10,6 +11,8 @@ from plexio.models.plex import (
 )
 from plexio.plex.utils import get_json
 from plexio.settings import settings
+
+GENRES_CACHE_TTL = 6 * 60 * 60
 
 SORT_OPTIONS = {
     'Title': 'title',
@@ -74,6 +77,7 @@ async def get_section_media(
     skip: int,
     search: str,
     sort: str,
+    genre: str | None = None,
 ) -> list[PlexMediaMeta]:
     params = {
         'includeGuids': 1,
@@ -85,6 +89,8 @@ async def get_section_media(
         params['title'] = search
     if sort:
         params['sort'] = SORT_OPTIONS[sort]
+    if genre:
+        params['genre'] = genre
     json = await get_json(
         client=client,
         url=url / 'library/sections' / section_id / 'all',
@@ -92,6 +98,33 @@ async def get_section_media(
     )
     metadata = json['MediaContainer'].get('Metadata', [])
     return [PlexMediaMeta(**meta) for meta in metadata]
+
+
+async def get_section_genres(
+    *,
+    client: ClientSession,
+    url: URL,
+    token: str,
+    cache,
+    section_id: str,
+) -> list[dict]:
+    cache_key = f'genres:{url.host}:{url.port}:{section_id}'
+    if cached_genres := await cache.get(cache_key):
+        return json.loads(cached_genres)
+
+    response = await get_json(
+        client=client,
+        url=url / 'library/sections' / section_id / 'genre',
+        params={
+            'X-Plex-Token': token,
+        },
+    )
+    genres = [
+        {'key': str(directory['key']), 'title': directory['title']}
+        for directory in response['MediaContainer'].get('Directory', [])
+    ]
+    await cache.set(cache_key, json.dumps(genres), ttl=GENRES_CACHE_TTL)
+    return genres
 
 
 async def get_media(

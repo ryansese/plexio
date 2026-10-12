@@ -1,4 +1,5 @@
 import asyncio
+import time
 from abc import ABC, abstractmethod
 from enum import Enum
 
@@ -23,7 +24,7 @@ class CacheType(Enum):
 
 class AbstractCache(ABC):
     @abstractmethod
-    async def set(self, key, value):
+    async def set(self, key, value, ttl=PLEX_CACHE_TTL):
         pass
 
     @abstractmethod
@@ -39,11 +40,15 @@ class MemoryCache(AbstractCache):
     def __init__(self):
         self._cache = {}
 
-    async def set(self, key, value):
-        self._cache[key] = value
+    async def set(self, key, value, ttl=PLEX_CACHE_TTL):
+        self._cache[key] = (value, time.monotonic() + ttl)
 
     async def get(self, key):
-        return self._cache.get(key)
+        value, expires_at = self._cache.get(key, (None, 0))
+        if time.monotonic() >= expires_at:
+            self._cache.pop(key, None)
+            return None
+        return value
 
     async def close(self):
         pass
@@ -56,10 +61,11 @@ class RedisCache(AbstractCache):
     def __init__(self, redis_url):
         self._redis = Redis.from_url(url=redis_url)
 
-    async def set(self, key, value):
+    async def set(self, key, value, ttl=PLEX_CACHE_TTL):
         for _ in range(RedisCache.RETRY_TIMES):
             try:
-                await self._redis.set(key, value, ex=PLEX_CACHE_TTL)
+                await self._redis.set(key, value, ex=ttl)
+                return
             except RedisConnectionError:
                 await asyncio.sleep(RedisCache.RETRY_BACKOFF_SEC)
 
